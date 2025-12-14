@@ -10,7 +10,6 @@ import com.google.gson.JsonObject;
 
 import java.awt.geom.Point2D;
 import java.io.IOException;
-import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -143,7 +142,6 @@ import org.mitre.synthea.engine.Components.Attachment;
 import org.mitre.synthea.export.rif.CodeMapper;
 import org.mitre.synthea.helpers.Config;
 import org.mitre.synthea.helpers.RandomNumberGenerator;
-import org.mitre.synthea.helpers.RandomValueGenerator;
 import org.mitre.synthea.helpers.SimpleCSV;
 import org.mitre.synthea.helpers.Utilities;
 import org.mitre.synthea.identity.Entity;
@@ -200,9 +198,10 @@ public class FhirR4 {
   private static final Table<String, String, String> US_CORE_4_MAPPING;
   private static final Table<String, String, String> US_CORE_5_MAPPING;
   private static final Table<String, String, String> US_CORE_6_MAPPING;
+  private static final Table<String, String, String> US_CORE_7_MAPPING;
 
   public static enum USCoreVersion {
-    v311, v400, v501, v610
+    v311, v400, v501, v610, v700
   }
 
   protected static boolean useUSCore3() {
@@ -237,6 +236,14 @@ public class FhirR4 {
     return useUSCore6;
   }
 
+  protected static boolean useUSCore7() {
+    boolean useUSCore7 = USE_US_CORE_IG && US_CORE_VERSION.startsWith("7");
+    if (useUSCore7) {
+      US_CORE_MAPPING = US_CORE_7_MAPPING;
+    }
+    return useUSCore7;
+  }
+
   private static final String COUNTRY_CODE = Config.get("generate.geography.country_code");
   private static final String PASSPORT_URI = Config.get("generate.geography.passport_uri", "http://hl7.org/fhir/sid/passport-USA");
 
@@ -247,12 +254,13 @@ public class FhirR4 {
     reloadIncludeExclude();
 
     Map<String, Table<String, String, String>> usCoreMappings =
-        loadMappingWithVersions("us_core_mapping.csv", "3", "4", "5", "6");
+        loadMappingWithVersions("us_core_mapping.csv", "3", "4", "5", "6", "7");
 
     US_CORE_3_MAPPING = usCoreMappings.get("3");
     US_CORE_4_MAPPING = usCoreMappings.get("4");
     US_CORE_5_MAPPING = usCoreMappings.get("5");
     US_CORE_6_MAPPING = usCoreMappings.get("6");
+    US_CORE_7_MAPPING = usCoreMappings.get("7");
 
     if (US_CORE_VERSION.startsWith("3")) {
       US_CORE_MAPPING = US_CORE_3_MAPPING;
@@ -262,6 +270,8 @@ public class FhirR4 {
       US_CORE_MAPPING = US_CORE_5_MAPPING;
     } else if (US_CORE_VERSION.startsWith("6")) {
       US_CORE_MAPPING = US_CORE_6_MAPPING;
+    } else if (US_CORE_VERSION.startsWith("7")) {
+      US_CORE_MAPPING = US_CORE_7_MAPPING;
     }
   }
 
@@ -372,7 +382,7 @@ public class FhirR4 {
 
         if (StringUtils.isBlank(version) || version.contains(versionKey)) {
           // blank means applies to ALL versions
-          // version.contains allows for things like "4,5,6"
+          // version.contains allows for things like "4+5+6"
           mappingTable.put(system, code, url);
         }
       }
@@ -1406,6 +1416,7 @@ public class FhirR4 {
     eob.addContained(referral);
     eob.setReferral(new Reference().setReference("#referral"));
 
+    // TODO: Make Coverage separate resources for US Core 6 & 7?
     // Get the insurance info at the time that the encounter occurred.
     Payer payer = claim.getPayer();
     Coverage coverage = new Coverage();
@@ -1641,7 +1652,7 @@ public class FhirR4 {
 
     if (USE_US_CORE_IG) {
       Meta meta = new Meta();
-      if (useUSCore5() || useUSCore6()) {
+      if (useUSCore5() || useUSCore6() || useUSCore7()) {
         meta.addProfile(
             "http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis");
       } else {
@@ -1869,14 +1880,20 @@ public class FhirR4 {
         meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab");
       }
 
+
       if (observation.category != null) {
-        if (useUSCore6()) {
+        if (useUSCore6() || useUSCore7()) {
           switch (observation.category) {
             case "imaging":
               meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result");
               break;
             case "social-history":
-              meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-simple-observation");
+              if (code.code.equals("82810-3")) {
+                meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancystatus");
+              } else {
+                meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-simple-observation");
+              }
+
               break;
             case "survey":
               meta.addProfile("http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-screening-assessment");
@@ -2336,7 +2353,7 @@ public class FhirR4 {
     medicationResource.setRequester(encounterResource.getParticipantFirstRep().getIndividual());
 
     if (medication.stop != 0L) {
-      medicationResource.setStatus(MedicationRequestStatus.STOPPED);
+      medicationResource.setStatus(MedicationRequestStatus.COMPLETED);
     } else {
       medicationResource.setStatus(MedicationRequestStatus.ACTIVE);
     }
@@ -3385,7 +3402,7 @@ public class FhirR4 {
    * @param system The system identifier, such as a URI. Optional; may be null.
    * @return The converted CodeableConcept
    */
-  private static CodeableConcept mapCodeToCodeableConcept(Code from, String system) {
+  public static CodeableConcept mapCodeToCodeableConcept(Code from, String system) {
     CodeableConcept to = new CodeableConcept();
     system = system == null ? null : ExportHelper.getSystemURI(system);
     from.system = ExportHelper.getSystemURI(from.system);
